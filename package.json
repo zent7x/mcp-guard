@@ -1,6 +1,6 @@
 {
-  "name": "mcp-guard",
-  "version": "0.1.1",
+  "name": "@zent7x/mcp-guard",
+  "version": "0.1.0",
   "description": "Security analysis MCP server — scan for secrets, check CVEs, audit HTTP headers",
   "type": "module",
   "main": "dist/index.js",

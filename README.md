@@ -50,7 +50,7 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "mcp-guard": {
       "command": "npx",
-      "args": ["-y", "mcp-guard"]
+      "args": ["-y", "@zent7x/mcp-guard"]
     }
   }
 }
@@ -67,7 +67,7 @@ Add to `.cursor/mcp.json` in your project (or the global Cursor MCP config):
   "mcpServers": {
     "mcp-guard": {
       "command": "npx",
-      "args": ["-y", "mcp-guard"]
+      "args": ["-y", "@zent7x/mcp-guard"]
     }
   }
 }
@@ -78,7 +78,7 @@ Add to `.cursor/mcp.json` in your project (or the global Cursor MCP config):
 If you prefer not to use `npx`:
 
 ```bash
-npm install -g mcp-guard
+npm install -g @zent7x/mcp-guard
 ```
 
 Then use `"command": "mcp-guard"` instead of `"command": "npx"` in the config above.
