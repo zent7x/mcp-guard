@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -12,7 +13,7 @@ import (
 )
 
 func main() {
-	s := server.NewMCPServer("mcp-guard", "0.5.0",
+	s := server.NewMCPServer("mcp-guard", "0.6.0",
 		server.WithToolCapabilities(true),
 	)
 
@@ -701,6 +702,130 @@ func main() {
 		}
 
 		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── critical_file_monitor ────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("critical_file_monitor",
+		mcp.WithDescription("Monitor critical system files for unauthorized changes. Three actions: 'scan' shows current state + permission issues; 'baseline' saves SHA-256 hashes of all critical files to disk; 'check' compares current state against the saved baseline and reports every modified, added, or removed file. Covers SSH keys, shell profiles, /etc/hosts, sudoers, LaunchAgents (macOS), systemd/passwd/shadow (Linux). Detects world-writable files and overly permissive SSH keys."),
+		mcp.WithString("action", mcp.Required(), mcp.Description("'scan' — show current state; 'baseline' — save hashes to disk; 'check' — diff against saved baseline")),
+		mcp.WithString("baseline_file", mcp.Description("Path to baseline JSON file (default: ~/.mcp-guard-baseline.json)")),
+		mcp.WithString("extra_paths", mcp.Description("Comma-separated extra paths to include beyond the defaults")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		action := req.GetString("action", "scan")
+		baselinePath := req.GetString("baseline_file", "")
+		if baselinePath == "" {
+			baselinePath = defaultBaselinePath()
+		}
+		extraStr := req.GetString("extra_paths", "")
+		var extra []string
+		for _, p := range strings.Split(extraStr, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				extra = append(extra, p)
+			}
+		}
+
+		switch action {
+		case "scan":
+			result, err := scanIntegrityFiles(extra)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("scan failed: %v", err)), nil
+			}
+			out := fmt.Sprintf("Critical file scan: %d files monitored\n", len(result.entries))
+			if len(result.warnings) > 0 {
+				out += fmt.Sprintf("\n! %d permission warning(s):\n", len(result.warnings))
+				for _, w := range result.warnings {
+					out += fmt.Sprintf("  %s\n", w)
+				}
+			} else {
+				out += "  No permission issues found\n"
+			}
+			out += "\nFiles:\n"
+			paths := make([]string, 0, len(result.entries))
+			for p := range result.entries {
+				paths = append(paths, p)
+			}
+			sort.Strings(paths)
+			for _, p := range paths {
+				e := result.entries[p]
+				out += fmt.Sprintf("  %s  %s  %s  %s\n",
+					e.Hash[:12]+"…",
+					e.Mode,
+					e.ModTime.Format("2006-01-02 15:04"),
+					p,
+				)
+			}
+			out += fmt.Sprintf("\nRun with action='baseline' to save these hashes. Run action='check' later to detect changes.\n")
+			return mcp.NewToolResultText(out), nil
+
+		case "baseline":
+			result, err := scanIntegrityFiles(extra)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("scan failed: %v", err)), nil
+			}
+			if err := saveIntegrityBaseline(result.entries, baselinePath); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("failed to save baseline: %v", err)), nil
+			}
+			out := fmt.Sprintf("Baseline saved: %d files hashed\n", len(result.entries))
+			out += fmt.Sprintf("Location: %s\n", baselinePath)
+			if len(result.warnings) > 0 {
+				out += fmt.Sprintf("\n! %d permission warning(s) at baseline time:\n", len(result.warnings))
+				for _, w := range result.warnings {
+					out += fmt.Sprintf("  %s\n", w)
+				}
+			}
+			out += "\nRun action='check' at any time to detect unauthorized changes.\n"
+			return mcp.NewToolResultText(out), nil
+
+		case "check":
+			baseline, err := loadIntegrityBaseline(baselinePath)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("no baseline found at %s — run action='baseline' first", baselinePath)), nil
+			}
+			result, err := scanIntegrityFiles(extra)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("scan failed: %v", err)), nil
+			}
+			diffs := diffIntegrity(result.entries, baseline)
+
+			out := fmt.Sprintf("Integrity check vs baseline from %s\n\n", baseline.CreatedAt.Format("2006-01-02 15:04:05"))
+
+			if len(result.warnings) > 0 {
+				out += fmt.Sprintf("! Permission warnings (%d):\n", len(result.warnings))
+				for _, w := range result.warnings {
+					out += fmt.Sprintf("  %s\n", w)
+				}
+				out += "\n"
+			}
+
+			if len(diffs) == 0 {
+				out += fmt.Sprintf("All %d files match baseline. No changes detected.\n", len(result.entries))
+				return mcp.NewToolResultText(out), nil
+			}
+
+			out += fmt.Sprintf("! %d change(s) detected:\n\n", len(diffs))
+			for _, d := range diffs {
+				out += fmt.Sprintf("[%s] %s\n", strings.ToUpper(d.Status), d.Path)
+				if d.Status == "modified" && d.Old != nil && d.Current != nil {
+					out += fmt.Sprintf("  hash:    %s → %s\n", d.Old.Hash[:16]+"…", d.Current.Hash[:16]+"…")
+					out += fmt.Sprintf("  size:    %d → %d bytes\n", d.Old.Size, d.Current.Size)
+					out += fmt.Sprintf("  modtime: %s → %s\n",
+						d.Old.ModTime.Format("2006-01-02 15:04:05"),
+						d.Current.ModTime.Format("2006-01-02 15:04:05"))
+				}
+				if d.Status == "permission_changed" && d.Old != nil && d.Current != nil {
+					out += fmt.Sprintf("  mode: %s → %s\n", d.Old.Mode, d.Current.Mode)
+				}
+				if d.Status == "removed" && d.Old != nil {
+					out += fmt.Sprintf("  was: %s  %s\n", d.Old.Hash[:16]+"…", d.Old.ModTime.Format("2006-01-02 15:04"))
+				}
+				out += "\n"
+			}
+			return mcp.NewToolResultText(out), nil
+
+		default:
+			return mcp.NewToolResultError("action must be 'scan', 'baseline', or 'check'"), nil
+		}
 	})
 
 	if err := server.ServeStdio(s); err != nil {
