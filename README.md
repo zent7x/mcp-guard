@@ -37,46 +37,51 @@ Returns: score, grade (A+ to F), per-header breakdown, list of missing required 
 
 ---
 
-## Install
-
-```bash
-npm install -g mcp-guard
-```
-
 ## Setup
+
+mcp-guard runs as a background process managed by your editor — you don't invoke it directly. Add it to your editor config and the tools become available in your AI assistant automatically.
 
 ### Claude Code
 
-Add to your `~/.claude/settings.json`:
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "mcp-guard": {
-      "command": "mcp-guard"
+      "command": "npx",
+      "args": ["-y", "mcp-guard"]
     }
   }
 }
 ```
 
+Then ask Claude: *"scan /path/to/project for secrets"* or *"audit the headers on https://mysite.com"*
+
 ### Cursor
 
-Add to your MCP config:
+Add to `.cursor/mcp.json` in your project (or the global Cursor MCP config):
 
 ```json
 {
-  "mcp-guard": {
-    "command": "npx",
-    "args": ["mcp-guard"]
+  "mcpServers": {
+    "mcp-guard": {
+      "command": "npx",
+      "args": ["-y", "mcp-guard"]
+    }
   }
 }
 ```
 
-### Run without installing
+### Global install (optional)
+
+If you prefer not to use `npx`:
 
 ```bash
-npx mcp-guard
+npm install -g mcp-guard
 ```
+
+Then use `"command": "mcp-guard"` instead of `"command": "npx"` in the config above.
 
 ## Build from source
 
