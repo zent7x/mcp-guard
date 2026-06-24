@@ -1,7 +1,5 @@
 {
   "name": "mcp-guard",
-  "description": "Security MCP server in Go. Gives Claude Code and Cursor tools that require local hardware or OS access — Wi-Fi scanning, ARP Layer 2 LAN discovery, kernel FS event watching, live process introspection, secret scanning, and file integrity hashing — alongside port scanning, TLS inspection, DNS enumeration, CVE checking, and HTTP header auditing.",
-  "license": "MIT",
-  "homepage": "https://github.com/zent7x/mcp-guard",
-  "categories": ["security", "developer-tools", "networking"]
+  "description": "Security MCP server in Go with 23 tools. 12 require local hardware or OS access no remote service can provide: Wi-Fi scanning via physical radio, Bluetooth/USB enumeration, ARP Layer 2 LAN discovery, kernel FS event watching, live process introspection, critical file integrity monitoring, local secret scanning, and supply chain auditing. Also includes port scanning, TLS inspection, DNS enumeration, CVE checking, HTTP header auditing, and persistence scanning.",
+  "categories": ["security", "penetration-testing"]
 }
