@@ -1,0 +1,286 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+	s := server.NewMCPServer("mcp-guard", "0.2.0",
+		server.WithToolCapabilities(true),
+	)
+
+	// ── port_scan ─────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("port_scan",
+		mcp.WithDescription("TCP port scan a host. Returns open ports with service guesses. Uses 200 concurrent goroutines — fast. Claude cannot do this natively."),
+		mcp.WithString("host", mcp.Required(), mcp.Description("Hostname or IP address to scan")),
+		mcp.WithNumber("start", mcp.Description("Start port (default 1)")),
+		mcp.WithNumber("end", mcp.Description("End port (default 1024)")),
+		mcp.WithNumber("timeout_ms", mcp.Description("Per-port timeout in ms (default 500)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		host := req.GetString("host", "")
+		start := req.GetInt("start", 1)
+		end := req.GetInt("end", 1024)
+		timeout := req.GetInt("timeout_ms", 500)
+
+		if host == "" {
+			return mcp.NewToolResultError("host is required"), nil
+		}
+		if start < 1 || end > 65535 || start > end {
+			return mcp.NewToolResultError("invalid port range"), nil
+		}
+
+		results := portScan(host, start, end, timeout)
+
+		if len(results) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No open ports on %s (scanned %d-%d)", host, start, end)), nil
+		}
+
+		out := fmt.Sprintf("Open ports on %s (%d-%d scanned)\n\n", host, start, end)
+		for _, r := range results {
+			out += fmt.Sprintf("  %-6d  %s\n", r.Port, r.Service)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── ssl_inspect ───────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("ssl_inspect",
+		mcp.WithDescription("Inspect the full TLS certificate chain of a host. Returns expiry countdown, issuer chain, SANs, key size, and weak-config warnings."),
+		mcp.WithString("host", mcp.Required(), mcp.Description("Hostname (e.g. github.com)")),
+		mcp.WithNumber("port", mcp.Description("Port (default 443)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		host := req.GetString("host", "")
+		port := req.GetInt("port", 443)
+
+		if host == "" {
+			return mcp.NewToolResultError("host is required"), nil
+		}
+
+		certs, err := sslInspect(host, port)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("TLS error: %v", err)), nil
+		}
+
+		out := fmt.Sprintf("TLS certificate chain: %s:%d\n\n", host, port)
+		for i, c := range certs {
+			label := "leaf"
+			if len(certs) > 1 && i == len(certs)-1 {
+				label = "root CA"
+			} else if i > 0 {
+				label = fmt.Sprintf("intermediate %d", i)
+			}
+			out += fmt.Sprintf("[%s]\n", label)
+			out += fmt.Sprintf("  Subject:   %s\n", c.Subject)
+			out += fmt.Sprintf("  Issuer:    %s\n", c.Issuer)
+			out += fmt.Sprintf("  Expires:   %s  (%d days left)\n", c.NotAfter.Format("2006-01-02"), c.DaysLeft)
+			out += fmt.Sprintf("  Algorithm: %s\n", c.Algorithm)
+			if len(c.SANs) > 0 {
+				out += fmt.Sprintf("  SANs:      %v\n", c.SANs)
+			}
+			for _, w := range c.Warnings {
+				out += fmt.Sprintf("  WARNING:   %s\n", w)
+			}
+			out += "\n"
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── dns_enum ──────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("dns_enum",
+		mcp.WithDescription("Enumerate all DNS records for a domain: A, AAAA, MX, NS, TXT, CNAME. Detects missing SPF/DMARC records."),
+		mcp.WithString("domain", mcp.Required(), mcp.Description("Domain to enumerate (e.g. example.com)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		domain := req.GetString("domain", "")
+		if domain == "" {
+			return mcp.NewToolResultError("domain is required"), nil
+		}
+
+		records, warnings := dnsEnum(domain)
+		if len(records) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No DNS records found for %s", domain)), nil
+		}
+
+		out := fmt.Sprintf("DNS records for %s\n\n", domain)
+		currentType := ""
+		for _, r := range records {
+			if r.Type != currentType {
+				out += fmt.Sprintf("── %s ──\n", r.Type)
+				currentType = r.Type
+			}
+			out += fmt.Sprintf("  %s\n", r.Value)
+		}
+
+		if len(warnings) > 0 {
+			out += "\nMisconfiguration warnings:\n"
+			for _, w := range warnings {
+				out += fmt.Sprintf("  ! %s\n", w)
+			}
+		}
+
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── proc_list ─────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("proc_list",
+		mcp.WithDescription("List running processes on this machine. Optionally filter by name. Shows PID, CPU%, memory usage, and command."),
+		mcp.WithString("filter", mcp.Description("Filter by process name substring (optional)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filter := req.GetString("filter", "")
+
+		procs, err := procList(filter)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("proc_list error: %v", err)), nil
+		}
+
+		if len(procs) == 0 {
+			msg := "No processes found"
+			if filter != "" {
+				msg = fmt.Sprintf("No processes matching %q", filter)
+			}
+			return mcp.NewToolResultText(msg), nil
+		}
+
+		out := fmt.Sprintf("%-8s  %-6s  %-10s  %s\n", "PID", "CPU%", "MEM", "COMMAND")
+		out += "─────────────────────────────────────────────────\n"
+		for _, p := range procs {
+			out += fmt.Sprintf("%-8d  %-6.1f  %-10s  %s\n", p.PID, p.CPU, p.Mem, p.Command)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── net_connections ───────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("net_connections",
+		mcp.WithDescription("List active network connections on this machine (like netstat). Shows local/remote address and connection state."),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		conns, err := netConnections()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("net_connections error: %v", err)), nil
+		}
+
+		if len(conns) == 0 {
+			return mcp.NewToolResultText("No active connections"), nil
+		}
+
+		out := fmt.Sprintf("%-30s  %-30s  %s\n", "LOCAL", "REMOTE", "STATE")
+		out += "─────────────────────────────────────────────────────────────────────\n"
+		for _, c := range conns {
+			out += fmt.Sprintf("%-30s  %-30s  %s\n", c.Local, c.Remote, c.State)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── scan_secrets ──────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("scan_secrets",
+		mcp.WithDescription("Scan a file or directory for hardcoded secrets: AWS keys, GitHub tokens, API keys, private key blocks, DB URLs, and more. 20+ patterns."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a file or directory")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		path := req.GetString("path", "")
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+
+		findings, err := scanSecrets(path)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("scan error: %v", err)), nil
+		}
+
+		if len(findings) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No secrets found in %s", path)), nil
+		}
+
+		byFile := map[string][]SecretFinding{}
+		high, med := 0, 0
+		for _, f := range findings {
+			byFile[f.File] = append(byFile[f.File], f)
+			if f.Severity == "high" {
+				high++
+			} else {
+				med++
+			}
+		}
+
+		out := fmt.Sprintf("Found %d secret(s) — %d high, %d medium\n\n", len(findings), high, med)
+		for file, items := range byFile {
+			out += file + "\n"
+			for _, item := range items {
+				out += fmt.Sprintf("  Line %-5d [%s] %s: %s\n", item.Line, item.Severity, item.Type, item.Match)
+			}
+			out += "\n"
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── audit_headers ─────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("audit_headers",
+		mcp.WithDescription("Audit HTTP security headers of a URL. Checks HSTS, CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy. Returns score/100 and grade."),
+		mcp.WithString("url", mcp.Required(), mcp.Description("URL to audit (e.g. https://example.com)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		url := req.GetString("url", "")
+		if url == "" {
+			return mcp.NewToolResultError("url is required"), nil
+		}
+
+		result, err := auditHeaders(url)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("audit error: %v", err)), nil
+		}
+
+		out := fmt.Sprintf("Security headers: %s\nScore: %d/100  Grade: %s\n\n", result.URL, result.Score, result.Grade)
+		if len(result.Missing) > 0 {
+			out += fmt.Sprintf("Missing: %v\n\n", result.Missing)
+		}
+		out += "Breakdown:\n"
+		for _, c := range result.Checks {
+			status := "–"
+			if c.Present {
+				status = "✓"
+			} else if c.Required {
+				status = "✗"
+			}
+			val := ""
+			if c.Value != "" {
+				if len(c.Value) > 80 {
+					val = "  →  " + c.Value[:80] + "…"
+				} else {
+					val = "  →  " + c.Value
+				}
+			}
+			out += fmt.Sprintf("  %s  %-35s%s\n", status, c.Header, val)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── check_cves ────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("check_cves",
+		mcp.WithDescription("Check npm dependencies in a package.json against the OSV vulnerability database. No API key needed."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a package.json file")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		path := req.GetString("path", "")
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+
+		findings, err := checkCVEs(path)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("CVE check error: %v", err)), nil
+		}
+
+		if len(findings) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No known vulnerabilities in %s", path)), nil
+		}
+
+		out := fmt.Sprintf("Found %d vulnerabilities in %s\n\n", len(findings), path)
+		for _, f := range findings {
+			out += fmt.Sprintf("[%s] %s@%s\n  %s\n  %s\n\n", f.Severity, f.Package, f.Version, f.Summary, f.URL)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	if err := server.ServeStdio(s); err != nil {
+		log.Fatal(err)
+	}
+}
