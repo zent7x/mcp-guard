@@ -1,107 +1,58 @@
 # mcp-guard
 
-Security MCP server written in Go. Gives Claude Code and Cursor the ability to do things they fundamentally cannot do on their own: scan TCP ports, inspect TLS certificate chains, enumerate DNS records, list running processes, and watch live network connections — alongside the standard security audits (secrets scanning, CVE checking, HTTP header analysis).
+MCP server for Claude Code and Cursor. Written in Go.
+
+Most MCP servers wrap APIs — things Claude could look up anyway. mcp-guard gives Claude tools that **require a physical machine to exist**: your Wi-Fi radio, your kernel's file event stream, your local network segment, your running processes. There is no API endpoint for these. No cloud service can see them. They only work because the binary is running on your computer.
 
 ## Tools
 
-### `port_scan`
-Concurrent TCP port scanner using 200 goroutines. Scans a host and returns open ports with service identification.
+### Local hardware and OS
 
-```
-port_scan("192.168.1.1", start=1, end=1024, timeout_ms=500)
-```
+**`wifi_scan`** — scan nearby Wi-Fi networks via your wireless hardware. Returns SSID, BSSID, signal strength, channel, security type. Requires a physical Wi-Fi adapter.
 
-Returns: port number, service name (ssh, http, mysql, redis, etc.)
+**`sys_info`** — CPU model, core count, RAM, disk, uptime, network interfaces with IPs and MACs. Read from local hardware via sysctl/proc — not from an API.
 
----
+**`file_watch`** — subscribe to kernel FS events (FSEvents on macOS, inotify on Linux) on any path. Returns real-time create/write/delete/rename events as they happen.
 
-### `ssl_inspect`
-Fetches and inspects the full TLS certificate chain for a host. Checks key size, signature algorithm, expiry countdown, and SANs.
+**`open_files`** — list every file, socket, and pipe currently held open by processes on this machine. Filter by process name or PID. Uses `lsof`.
 
-```
-ssl_inspect("github.com")
-ssl_inspect("mysite.com", port=8443)
-```
+**`proc_list`** — list running processes with CPU% and memory. Filter by name.
 
-Returns: leaf cert, intermediate(s), root CA — with expiry warnings if under 30 days.
+**`net_connections`** — live TCP connections on this machine (`netstat -an`).
 
----
+### Local network (LAN only)
 
-### `dns_enum`
-Enumerates all DNS record types for a domain: A, AAAA, MX, NS, TXT, CNAME. Detects missing SPF and DMARC records.
+**`arp_scan`** — Layer 2 host discovery. Finds every device on your local network including ones that block all ICMP and TCP. Returns IP, MAC address, hostname, vendor. Only works from a machine on the same network segment — a remote service receives no ARP frames.
 
-```
-dns_enum("example.com")
-```
+**`ping_sweep`** — ICMP sweep across a CIDR range. Concurrent, 64 goroutines. Returns live hosts with latency.
 
-Returns: all records grouped by type, plus email security warnings.
+**`traceroute`** — network path to any host, hop by hop. Shows the actual path packets take from this machine.
 
----
+### Local file access
 
-### `proc_list`
-Lists running processes on the local machine. Optionally filter by name.
+**`scan_secrets`** — walk a directory and find hardcoded credentials using 20+ regex patterns: AWS keys, GitHub tokens, OpenAI/Anthropic keys, Stripe, Slack, Twilio, private key blocks, DB connection strings, JWT secrets. Skips `node_modules`, `.git`, binaries.
 
-```
-proc_list()
-proc_list("node")
-proc_list("python")
-```
+**`hash_files`** — SHA-256 every file in a directory. Use it to create an integrity baseline before and after a deploy, or verify nothing changed in a dependency.
 
-Returns: PID, CPU%, memory usage, command name.
+### Network utilities
 
----
+**`port_scan`** — concurrent TCP scanner, 200 goroutines, service name lookup.
 
-### `net_connections`
-Lists active TCP connections on the local machine (equivalent to `netstat -an`).
+**`ssl_inspect`** — full TLS certificate chain inspection. Key size, algo, expiry, SANs.
 
-```
-net_connections()
-```
+**`dns_enum`** — A, AAAA, MX, NS, TXT, CNAME. Detects missing SPF/DMARC.
 
-Returns: local address, remote address, connection state.
+**`banner_grab`** — raw TCP banner grab for any protocol (SSH, FTP, SMTP, Redis, memcached).
 
----
+**`audit_headers`** — HTTP security header audit. Score 0–100, letter grade.
 
-### `scan_secrets`
-Scans a file or directory for hardcoded secrets using 20+ provider-specific patterns. Covers AWS keys, GitHub tokens, Anthropic/OpenAI API keys, Stripe, Slack, Twilio, SendGrid, database URLs, private key blocks, JWT secrets, and generic patterns.
+**`check_cves`** — check all npm deps in a `package.json` against OSV. No API key.
 
-```
-scan_secrets("/path/to/project")
-```
-
-Returns: file path, line number, secret type, redacted match, severity.
-
----
-
-### `audit_headers`
-Fetches a URL and audits its HTTP security headers. Scores 0–100 and assigns a letter grade.
-
-```
-audit_headers("https://example.com")
-```
-
-Returns: score, grade (A+ to F), per-header breakdown, missing required headers.
-
----
-
-### `check_cves`
-Checks all npm dependencies in a `package.json` against the OSV vulnerability database. No API key required.
-
-```
-check_cves("/path/to/package.json")
-```
-
-Returns: vulnerable package, version, CVE ID, severity, summary, advisory link.
-
----
+**`jwt_decode`** — local JWT decode and analysis. Algorithm, expiry, security warnings.
 
 ## Setup
 
-mcp-guard runs as a background process managed by your editor. Add it to your config and the tools become available automatically.
-
 ### Claude Code
-
-Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -113,11 +64,11 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+Add to `~/.claude/settings.json` (global) or `.claude/settings.json` (per project).
 
 ### Cursor
 
-Add to `.cursor/mcp.json`:
-
 ```json
 {
   "mcpServers": {
@@ -128,6 +79,8 @@ Add to `.cursor/mcp.json`:
   }
 }
 ```
+
+Add to `.cursor/mcp.json`.
 
 ### Global install
 
@@ -135,23 +88,23 @@ Add to `.cursor/mcp.json`:
 npm install -g @zent7x/mcp-guard
 ```
 
-Then use `"command": "mcp-guard"` instead of `"command": "npx"` in the config.
+Then use `"command": "mcp-guard"` in the config above.
+
+## How it works
+
+The npm package downloads a pre-compiled Go binary for your platform on install. The binary runs as a stdio MCP server — your editor spawns it and speaks the Model Context Protocol over stdin/stdout.
+
+Platform binaries ship for `darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`, `windows-amd64`.
 
 ## Build from source
-
-Requires Go 1.21+:
 
 ```bash
 git clone https://github.com/zent7x/mcp-guard
 cd mcp-guard
-go build -o mcp-guard-bin .
+go build -o mcp-guard .
 ```
 
-## Architecture
-
-The core is a Go binary built with [mark3labs/mcp-go](https://github.com/mark3labs/mcp-go). The npm package downloads the correct platform binary on install and spawns it as the MCP stdio server.
-
-Platform binaries: `darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`, `windows-amd64`.
+Requires Go 1.21+.
 
 ## License
 
