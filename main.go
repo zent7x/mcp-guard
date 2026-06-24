@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	s := server.NewMCPServer("mcp-guard", "0.6.0",
+	s := server.NewMCPServer("mcp-guard", "0.7.0",
 		server.WithToolCapabilities(true),
 	)
 
@@ -94,8 +94,8 @@ func main() {
 
 	// ── dns_enum ──────────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("dns_enum",
-		mcp.WithDescription("Enumerate all DNS records for a domain: A, AAAA, MX, NS, TXT, CNAME. Detects missing SPF/DMARC records."),
-		mcp.WithString("domain", mcp.Required(), mcp.Description("Domain to enumerate (e.g. example.com)")),
+		mcp.WithDescription("Enumerate all DNS record types for a domain: A (IPv4), AAAA (IPv6), MX (mail servers with priority), NS (nameservers), TXT (SPF, DKIM, verification tokens), and CNAME (aliases). Groups results by record type. Automatically detects email security misconfigurations: warns if SPF record is missing or too permissive (+all), warns if DMARC record is absent. Returns raw record values suitable for debugging mail delivery, verifying DNS propagation, or mapping a domain's infrastructure."),
+		mcp.WithString("domain", mcp.Required(), mcp.Description("Domain name to enumerate DNS records for. Do not include protocol or path. Examples: 'example.com', 'mail.google.com', 'api.stripe.com'. Subdomains are supported.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		domain := req.GetString("domain", "")
 		if domain == "" {
@@ -129,8 +129,8 @@ func main() {
 
 	// ── proc_list ─────────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("proc_list",
-		mcp.WithDescription("List running processes on this machine. Optionally filter by name. Shows PID, CPU%, memory usage, and command."),
-		mcp.WithString("filter", mcp.Description("Filter by process name substring (optional)")),
+		mcp.WithDescription("List all running processes on this machine. Returns PID, CPU usage percentage, memory usage (human-readable: KB/MB/GB), and full command string including arguments. Results are sorted by CPU usage descending so the most active processes appear first. Filter by process name substring to focus on a specific service — 'node' matches node, nodemon, node-red. Reads the local process table directly — no remote service has access to your machine's processes."),
+		mcp.WithString("filter", mcp.Description("Optional process name substring to filter results, case-insensitive. Examples: 'python' matches python3/gunicorn/uvicorn, 'postgres' matches all postgres workers, '1234' filters to PID 1234. Leave empty to list all processes.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		filter := req.GetString("filter", "")
 
@@ -157,7 +157,7 @@ func main() {
 
 	// ── net_connections ───────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("net_connections",
-		mcp.WithDescription("List active network connections on this machine (like netstat). Shows local/remote address and connection state."),
+		mcp.WithDescription("List all active TCP connections on this machine, equivalent to 'netstat -an'. Returns local address (IP:port), remote address (IP:port), and connection state (ESTABLISHED, LISTEN, TIME_WAIT, CLOSE_WAIT, SYN_SENT, etc.). Shows every inbound and outbound connection including which ports are listening for new connections. Useful for detecting unexpected outbound connections, confirming a service is listening on the right port, or identifying connections from suspicious remote IPs. Reads the local network stack — impossible for any remote service to enumerate your machine's connections."),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		conns, err := netConnections()
 		if err != nil {
@@ -178,8 +178,8 @@ func main() {
 
 	// ── scan_secrets ──────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("scan_secrets",
-		mcp.WithDescription("Scan a file or directory for hardcoded secrets: AWS keys, GitHub tokens, API keys, private key blocks, DB URLs, and more. 20+ patterns."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a file or directory")),
+		mcp.WithDescription("Recursively scan a file or directory for hardcoded secrets using 25+ regex patterns. Detects: AWS access/secret keys, GitHub/GitLab/Anthropic/OpenAI/Stripe/Slack API keys, Twilio and SendGrid credentials, database connection URLs (postgres://, mysql://, mongodb://), PEM private key blocks, JWT secrets, and high-entropy generic tokens. Returns file path, line number, secret type, redacted match (first 6 chars + last 4), and severity (high/medium). Skips binary files, .git, node_modules, and vendor directories. Reads your local codebase — impossible remotely."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to scan — a single file or a directory to walk recursively. Examples: '/home/user/myproject', '/etc/myapp/config.yaml', '.' for current directory. Large repos with node_modules excluded scan in seconds.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		path := req.GetString("path", "")
 		if path == "" {
@@ -219,8 +219,8 @@ func main() {
 
 	// ── audit_headers ─────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("audit_headers",
-		mcp.WithDescription("Audit HTTP security headers of a URL. Checks HSTS, CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy. Returns score/100 and grade."),
-		mcp.WithString("url", mcp.Required(), mcp.Description("URL to audit (e.g. https://example.com)")),
+		mcp.WithDescription("Fetch a URL and audit its HTTP security response headers. Checks: Content-Security-Policy, Strict-Transport-Security (HSTS with max-age), X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, and whether Server/X-Powered-By headers leak software versions. Returns a score from 0–100, a letter grade (A+ to F), per-header pass/fail status, current header values, and specific remediation advice for each missing or misconfigured header. Grade A+ requires all headers present and correctly configured."),
+		mcp.WithString("url", mcp.Required(), mcp.Description("Full URL to audit including protocol and domain. Must be publicly reachable. Examples: 'https://example.com', 'https://api.myapp.com/v1/health'. HTTP and HTTPS both accepted.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		url := req.GetString("url", "")
 		if url == "" {
@@ -259,8 +259,8 @@ func main() {
 
 	// ── check_cves ────────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("check_cves",
-		mcp.WithDescription("Check npm dependencies in a package.json against the OSV vulnerability database. No API key needed."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a package.json file")),
+		mcp.WithDescription("Check all npm dependencies declared in a package.json against the OSV (Open Source Vulnerabilities) database maintained by Google. No API key or account required. Returns for each vulnerable package: package name, installed version, CVE/GHSA advisory ID, CVSS severity (critical/high/medium/low), human-readable vulnerability summary, affected version ranges, and a direct link to the full advisory. Covers both dependencies and devDependencies. Run before deploying or after a supply chain incident to identify known-vulnerable packages."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a package.json file. Examples: '/home/user/myapp/package.json', './frontend/package.json'. The file must contain a 'dependencies' or 'devDependencies' field. Does not require node_modules to be installed.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		path := req.GetString("path", "")
 		if path == "" {
@@ -305,8 +305,8 @@ func main() {
 
 	// ── ping_sweep ────────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("ping_sweep",
-		mcp.WithDescription("Send ICMP pings to all hosts in a CIDR range and return live hosts. Works on the local network — finds hosts even if they have no open TCP ports. Claude cannot send ICMP packets."),
-		mcp.WithString("cidr", mcp.Required(), mcp.Description("CIDR range to sweep (e.g. 192.168.1.0/24)")),
+		mcp.WithDescription("Sweep a CIDR range with ICMP pings from this machine and return all live hosts. Returns IP address, resolved hostname (if available), and round-trip latency in milliseconds. Uses 64 concurrent goroutines — a /24 completes in under 3 seconds. Finds hosts that have no open TCP ports and would be invisible to port scanners. Requires the ability to send raw ICMP packets from this machine — architecturally impossible for Claude running in a remote data center."),
+		mcp.WithString("cidr", mcp.Required(), mcp.Description("Network range in CIDR notation to sweep. Examples: '192.168.1.0/24' for a typical home/office LAN, '10.0.0.0/16' for a larger subnet. Smaller ranges (/24) complete in ~2s; larger ranges (/16) may take 30–60s.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cidr := req.GetString("cidr", "")
 		if cidr == "" {
@@ -408,9 +408,9 @@ func main() {
 
 	// ── file_watch ────────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("file_watch",
-		mcp.WithDescription("Watch a file or directory for changes using kernel-level FS events (FSEvents on macOS, inotify on Linux). Captures creates, writes, deletes, renames in real time. A background MCP process can do this — Claude in a chat window never could."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("File or directory to watch")),
-		mcp.WithNumber("seconds", mcp.Description("How long to watch in seconds (default 10, max 60)")),
+		mcp.WithDescription("Subscribe to kernel-level filesystem events on a path using FSEvents (macOS) or inotify (Linux). Returns a timestamped event log with operation type (CREATE, WRITE, REMOVE, RENAME) and the affected file path. Not polling — actual kernel callbacks with sub-millisecond latency. Watching a directory captures events recursively on all files and subdirectories within it. Useful for detecting file changes during a build, monitoring config edits, or auditing what files a process touches. Unlike 'tail -f', works on any file type including binaries and directories."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a file or directory to monitor. Directory watching is recursive. Examples: '/etc' to watch system config changes, '/home/user/project/src' to watch source file edits, '/var/log/nginx' to catch new log entries.")),
+		mcp.WithNumber("seconds", mcp.Description("How many seconds to collect events before returning. Default 10, maximum 60. Increase for longer operations like builds or deploys. Returns immediately if no events occur.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		path := req.GetString("path", "")
 		secs := req.GetInt("seconds", 10)
@@ -467,8 +467,8 @@ func main() {
 
 	// ── open_files ────────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("open_files",
-		mcp.WithDescription("List files, sockets, and pipes currently open by processes on this machine. Filter by process name or PID. Uses lsof — shows exactly what a process is reading, writing, or listening on."),
-		mcp.WithString("filter", mcp.Description("Process name or PID to filter (optional — leave empty for all)")),
+		mcp.WithDescription("List every file, socket, and network connection currently held open by processes on this machine via lsof. Returns process name, PID, file descriptor type (REG for regular files, SOCK for sockets, FIFO for pipes, IPv4/IPv6 for network), and file path or remote network address. Filter by process name to see what a specific service is reading or writing, or by PID for exact targeting. Useful for debugging file locks, finding what ports a service is listening on, or detecting unexpected outbound connections from a process."),
+		mcp.WithString("filter", mcp.Description("Process name or numeric PID to filter results. Examples: 'nginx' shows all files held by nginx workers, 'postgres' shows database file handles and client connections, '8080' filters to PID 8080. Leave empty to list all open files across all processes (output may be large).")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		filter := req.GetString("filter", "")
 		files, err := openFiles(filter)
@@ -531,8 +531,8 @@ func main() {
 
 	// ── hash_files ────────────────────────────────────────────────────────────
 	s.AddTool(mcp.NewTool("hash_files",
-		mcp.WithDescription("Compute SHA-256 hashes of all files in a directory. Use to create integrity baselines, detect tampering, or verify files haven't changed. Reads local disk — not possible remotely."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("File or directory to hash recursively")),
+		mcp.WithDescription("Compute SHA-256 hashes of every file in a directory tree and return them as a manifest. Each entry includes the full file path, SHA-256 hex digest, and file size in bytes. Skips .git, node_modules, vendor, and .cache directories. Use to create an integrity baseline before a deploy, verify a build artifact hasn't been tampered with, or diff two directory snapshots. Reads local disk byte-by-byte — a remote service has no access to your filesystem."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a file or directory to hash. For a directory, all files are hashed recursively. Examples: '/home/user/project/dist' to hash a build output, '/etc/nginx' to baseline a config directory, '/usr/local/bin/myapp' to hash a single binary.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		path := req.GetString("path", "")
 		if path == "" {
