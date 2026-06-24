@@ -1,13 +1,15 @@
 {
   "name": "mcp-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Security analysis MCP server — scan for secrets, check CVEs, audit HTTP headers",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "mcp-guard": "dist/index.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -22,7 +24,16 @@
     "typescript": "^5.0.0",
     "@types/node": "^20.0.0"
   },
-  "keywords": ["mcp", "security", "secrets", "cve", "claude", "cursor"],
+  "keywords": [
+    "mcp",
+    "security",
+    "secrets",
+    "cve",
+    "claude",
+    "cursor"
+  ],
   "license": "MIT",
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }
