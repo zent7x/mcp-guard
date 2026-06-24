@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
 func main() {
-	s := server.NewMCPServer("mcp-guard", "0.2.0",
+	s := server.NewMCPServer("mcp-guard", "0.3.0",
 		server.WithToolCapabilities(true),
 	)
 
@@ -276,6 +278,275 @@ func main() {
 		out := fmt.Sprintf("Found %d vulnerabilities in %s\n\n", len(findings), path)
 		for _, f := range findings {
 			out += fmt.Sprintf("[%s] %s@%s\n  %s\n  %s\n\n", f.Severity, f.Package, f.Version, f.Summary, f.URL)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── wifi_scan ─────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("wifi_scan",
+		mcp.WithDescription("Scan nearby Wi-Fi networks using local wireless hardware. Returns SSID, BSSID, signal strength, channel, and security type. Requires physical Wi-Fi hardware — impossible for Claude to do remotely."),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		networks, err := wifiScan()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("wifi_scan failed: %v", err)), nil
+		}
+		if len(networks) == 0 {
+			return mcp.NewToolResultText("No Wi-Fi networks detected"), nil
+		}
+		out := fmt.Sprintf("Wi-Fi networks (%d found)\n\n", len(networks))
+		out += fmt.Sprintf("%-32s  %-19s  %-8s  %-7s  %s\n", "SSID", "BSSID", "SIGNAL", "CHANNEL", "SECURITY")
+		out += strings.Repeat("─", 90) + "\n"
+		for _, n := range networks {
+			out += fmt.Sprintf("%-32s  %-19s  %-8s  %-7s  %s\n", n.SSID, n.BSSID, n.Signal, n.Channel, n.Security)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── ping_sweep ────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("ping_sweep",
+		mcp.WithDescription("Send ICMP pings to all hosts in a CIDR range and return live hosts. Works on the local network — finds hosts even if they have no open TCP ports. Claude cannot send ICMP packets."),
+		mcp.WithString("cidr", mcp.Required(), mcp.Description("CIDR range to sweep (e.g. 192.168.1.0/24)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		cidr := req.GetString("cidr", "")
+		if cidr == "" {
+			return mcp.NewToolResultError("cidr is required"), nil
+		}
+		results, err := pingSweep(cidr)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("ping_sweep error: %v", err)), nil
+		}
+		if len(results) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No live hosts in %s", cidr)), nil
+		}
+		out := fmt.Sprintf("Live hosts in %s (%d found)\n\n", cidr, len(results))
+		for _, r := range results {
+			out += fmt.Sprintf("  %-20s  %s\n", r.IP, r.Latency)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── arp_scan ──────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("arp_scan",
+		mcp.WithDescription("Layer 2 LAN host discovery — finds ALL devices on local network including those that block ICMP/TCP. Returns IP, MAC address, hostname, and vendor. Only possible from a machine on the same network segment."),
+		mcp.WithString("cidr", mcp.Required(), mcp.Description("Local network CIDR (e.g. 192.168.1.0/24)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		cidr := req.GetString("cidr", "")
+		if cidr == "" {
+			return mcp.NewToolResultError("cidr is required"), nil
+		}
+		entries, err := arpScan(cidr)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("arp_scan error: %v", err)), nil
+		}
+		if len(entries) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No ARP entries found for %s", cidr)), nil
+		}
+		out := fmt.Sprintf("LAN devices in %s (%d found)\n\n", cidr, len(entries))
+		out += fmt.Sprintf("%-18s  %-19s  %-20s  %s\n", "IP", "MAC", "HOSTNAME", "VENDOR")
+		out += strings.Repeat("─", 80) + "\n"
+		for _, e := range entries {
+			out += fmt.Sprintf("%-18s  %-19s  %-20s  %s\n", e.IP, e.MAC, e.Hostname, e.Vendor)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── traceroute ────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("traceroute",
+		mcp.WithDescription("Trace the network path to a host hop-by-hop using ICMP TTL probes. Shows every router between this machine and the target. Requires raw packet sending — Claude cannot do this."),
+		mcp.WithString("host", mcp.Required(), mcp.Description("Target hostname or IP")),
+		mcp.WithNumber("max_hops", mcp.Description("Maximum hops (default 15)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		host := req.GetString("host", "")
+		maxHops := req.GetInt("max_hops", 15)
+		if host == "" {
+			return mcp.NewToolResultError("host is required"), nil
+		}
+		hops, err := doTraceroute(host, maxHops)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("traceroute error: %v", err)), nil
+		}
+		out := fmt.Sprintf("Traceroute to %s (max %d hops)\n\n", host, maxHops)
+		for _, h := range hops {
+			if h.Timeout {
+				out += fmt.Sprintf("  %2d  * * *  (no response)\n", h.Hop)
+			} else {
+				ip := h.IP
+				if ip == "" {
+					ip = "unknown"
+				}
+				rtt := h.RTT
+				if rtt == "" {
+					rtt = "?"
+				}
+				out += fmt.Sprintf("  %2d  %-20s  %s\n", h.Hop, ip, rtt)
+			}
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── banner_grab ───────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("banner_grab",
+		mcp.WithDescription("Connect to a TCP port and capture the raw service banner. Unlike HTTP fetching, reads raw bytes from any protocol — SSH, FTP, SMTP, Redis, memcached, MySQL, etc."),
+		mcp.WithString("host", mcp.Required(), mcp.Description("Hostname or IP to connect to")),
+		mcp.WithNumber("port", mcp.Required(), mcp.Description("TCP port number")),
+		mcp.WithNumber("timeout_ms", mcp.Description("Connection timeout in ms (default 3000)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		host := req.GetString("host", "")
+		port := req.GetInt("port", 0)
+		timeout := req.GetInt("timeout_ms", 3000)
+		if host == "" || port == 0 {
+			return mcp.NewToolResultError("host and port are required"), nil
+		}
+		banner, err := bannerGrab(host, port, timeout)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("banner_grab error: %v", err)), nil
+		}
+		out := fmt.Sprintf("Banner from %s:%d\n\n%s\n", host, port, banner)
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── file_watch ────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("file_watch",
+		mcp.WithDescription("Watch a file or directory for changes using kernel-level FS events (FSEvents on macOS, inotify on Linux). Captures creates, writes, deletes, renames in real time. A background MCP process can do this — Claude in a chat window never could."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("File or directory to watch")),
+		mcp.WithNumber("seconds", mcp.Description("How long to watch in seconds (default 10, max 60)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		path := req.GetString("path", "")
+		secs := req.GetInt("seconds", 10)
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+		if secs > 60 {
+			secs = 60
+		}
+		events, err := fileWatch(path, secs)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("file_watch error: %v", err)), nil
+		}
+		if len(events) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No file system events in %s for %ds", path, secs)), nil
+		}
+		out := fmt.Sprintf("File system events in %s (%ds watch, %d events)\n\n", path, secs, len(events))
+		for _, e := range events {
+			out += fmt.Sprintf("  %s  %-12s  %s\n", e.Time, e.Op, e.Path)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── sys_info ──────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("sys_info",
+		mcp.WithDescription("Get detailed local system information: CPU model, RAM, disk space, uptime, network interfaces with IPs and MACs. Reads from local hardware — not available to any remote service."),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		info, err := sysInfo()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("sys_info error: %v", err)), nil
+		}
+		out := "System Information\n\n"
+		out += fmt.Sprintf("  Hostname:   %s\n", info.Hostname)
+		out += fmt.Sprintf("  OS:         %s/%s\n", info.OS, info.Arch)
+		out += fmt.Sprintf("  CPU:        %s (%d cores)\n", info.CPU, info.Cores)
+		out += fmt.Sprintf("  RAM:        %s total", info.TotalRAM)
+		if info.FreeRAM != "" {
+			out += fmt.Sprintf("  (%s available)", info.FreeRAM)
+		}
+		out += "\n"
+		out += fmt.Sprintf("  Disk (/):   %s total, %s free\n", info.DiskTotal, info.DiskFree)
+		out += fmt.Sprintf("  Uptime:     %s\n", info.Uptime)
+		if len(info.Interfaces) > 0 {
+			out += "\nNetwork interfaces:\n"
+			for _, iface := range info.Interfaces {
+				if iface.IP == "" && iface.MAC == "" {
+					continue
+				}
+				out += fmt.Sprintf("  %-12s  IP: %-20s  MAC: %s\n", iface.Name, iface.IP, iface.MAC)
+			}
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── open_files ────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("open_files",
+		mcp.WithDescription("List files, sockets, and pipes currently open by processes on this machine. Filter by process name or PID. Uses lsof — shows exactly what a process is reading, writing, or listening on."),
+		mcp.WithString("filter", mcp.Description("Process name or PID to filter (optional — leave empty for all)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filter := req.GetString("filter", "")
+		files, err := openFiles(filter)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("open_files error: %v", err)), nil
+		}
+		if len(files) == 0 {
+			return mcp.NewToolResultText("No open files found"), nil
+		}
+		out := fmt.Sprintf("Open files/sockets (%d entries)\n\n", len(files))
+		out += fmt.Sprintf("%-12s  %-8s  %-8s  %s\n", "PROCESS", "PID", "TYPE", "NAME")
+		out += strings.Repeat("─", 70) + "\n"
+		for _, f := range files {
+			name := f.Name
+			if len(name) > 60 {
+				name = "..." + name[len(name)-57:]
+			}
+			out += fmt.Sprintf("%-12s  %-8s  %-8s  %s\n", f.Process, f.PID, f.Type, name)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── jwt_decode ────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("jwt_decode",
+		mcp.WithDescription("Decode and analyze a JWT token locally without sending it anywhere. Shows header, payload, expiry, algorithm, and security warnings (e.g. 'none' algorithm, expired token, weak signing)."),
+		mcp.WithString("token", mcp.Required(), mcp.Description("JWT token string to decode")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		token := req.GetString("token", "")
+		if token == "" {
+			return mcp.NewToolResultError("token is required"), nil
+		}
+		info, err := jwtDecode(token)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("jwt_decode error: %v", err)), nil
+		}
+		headerJSON, _ := json.MarshalIndent(info.Header, "  ", "  ")
+		payloadJSON, _ := json.MarshalIndent(info.Payload, "  ", "  ")
+		out := "JWT Analysis\n\n"
+		out += fmt.Sprintf("Algorithm: %s\n", info.Algorithm)
+		if info.IssuedAt != "" {
+			out += fmt.Sprintf("Issued:    %s\n", info.IssuedAt)
+		}
+		if info.Expires != "" {
+			status := "valid"
+			if info.Expired {
+				status = "EXPIRED"
+			}
+			out += fmt.Sprintf("Expires:   %s  [%s]\n", info.Expires, status)
+		}
+		if len(info.Warnings) > 0 {
+			out += "\nWarnings:\n"
+			for _, w := range info.Warnings {
+				out += fmt.Sprintf("  ! %s\n", w)
+			}
+		}
+		out += "\nHeader:\n  " + string(headerJSON) + "\n"
+		out += "\nPayload:\n  " + string(payloadJSON) + "\n"
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── hash_files ────────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("hash_files",
+		mcp.WithDescription("Compute SHA-256 hashes of all files in a directory. Use to create integrity baselines, detect tampering, or verify files haven't changed. Reads local disk — not possible remotely."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("File or directory to hash recursively")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		path := req.GetString("path", "")
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+		results, err := hashFiles(path)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("hash_files error: %v", err)), nil
+		}
+		if len(results) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No files found in %s", path)), nil
+		}
+		out := fmt.Sprintf("SHA-256 hashes for %s (%d files)\n\n", path, len(results))
+		for _, r := range results {
+			out += fmt.Sprintf("%s  %s  (%s)\n", r.Hash[:16]+"…", r.Path, formatBytes(r.Size))
 		}
 		return mcp.NewToolResultText(out), nil
 	})

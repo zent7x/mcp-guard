@@ -1,6 +1,6 @@
 {
   "name": "@zent7x/mcp-guard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Security MCP server — port scanning, SSL inspection, DNS enum, secret scanning, CVE checking, header auditing",
   "main": "index.js",
   "bin": {
