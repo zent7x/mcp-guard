@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	s := server.NewMCPServer("mcp-guard", "0.4.0",
+	s := server.NewMCPServer("mcp-guard", "0.5.0",
 		server.WithToolCapabilities(true),
 	)
 
@@ -595,6 +595,111 @@ func main() {
 		for _, d := range devices {
 			out += fmt.Sprintf("%-35s  %-10s  %-10s  %-15s  %s\n", d.Name, d.VendorID, d.ProductID, d.Speed, d.Manufacturer)
 		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── persistence_scan ─────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("persistence_scan",
+		mcp.WithDescription("Scan this machine for malware persistence mechanisms: LaunchAgents/LaunchDaemons (macOS), systemd units (Linux), cron jobs, and shell profile injections. Flags high-risk patterns like curl-pipe-to-bash, base64-encoded payloads, and binaries executing from /tmp. Essential first step when investigating a potentially compromised machine."),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		entries, err := persistenceScan()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("persistence_scan failed: %v", err)), nil
+		}
+		if len(entries) == 0 {
+			return mcp.NewToolResultText("No persistence entries found"), nil
+		}
+
+		// Group by risk
+		var high, medium, low []PersistenceEntry
+		for _, e := range entries {
+			switch e.Risk {
+			case "high":
+				high = append(high, e)
+			case "medium":
+				medium = append(medium, e)
+			default:
+				low = append(low, e)
+			}
+		}
+
+		out := fmt.Sprintf("Persistence scan: %d entries (%d high, %d medium, %d low)\n\n",
+			len(entries), len(high), len(medium), len(low))
+
+		printPersistenceGroup := func(label string, group []PersistenceEntry) {
+			if len(group) == 0 {
+				return
+			}
+			out += fmt.Sprintf("── %s (%d) ──\n", label, len(group))
+			for _, e := range group {
+				out += fmt.Sprintf("  [%s] %s\n", e.Type, e.Name)
+				if e.Command != "" {
+					out += fmt.Sprintf("    cmd:  %s\n", truncatePersistence(e.Command, 100))
+				}
+				if e.Path != "" {
+					out += fmt.Sprintf("    path: %s\n", e.Path)
+				}
+				if e.Reason != "" {
+					out += fmt.Sprintf("    why:  %s\n", e.Reason)
+				}
+				if !e.Modified.IsZero() {
+					out += fmt.Sprintf("    mod:  %s\n", e.Modified.Format("2006-01-02 15:04"))
+				}
+				out += "\n"
+			}
+		}
+
+		printPersistenceGroup("HIGH RISK", high)
+		printPersistenceGroup("MEDIUM RISK", medium)
+		printPersistenceGroup("LOW RISK", low)
+
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── supply_chain_audit ────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("supply_chain_audit",
+		mcp.WithDescription("Audit a Node.js project's dependencies for supply chain attack indicators. Checks all packages in node_modules for: dangerous lifecycle scripts (postinstall that curl-pipe-to-bash, eval, base64 decode), typosquatting against 50+ popular package names (Levenshtein distance 1), and eval() of runtime data in source files. Reads local filesystem — no remote service can inspect your node_modules."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the Node.js project root (must contain package-lock.json and node_modules)")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		path := req.GetString("path", "")
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+
+		findings, err := supplyChainAudit(path)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if len(findings) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No supply chain issues found in %s", path)), nil
+		}
+
+		// Group by severity
+		bySev := map[string][]SCFinding{"high": {}, "medium": {}, "low": {}}
+		for _, f := range findings {
+			bySev[f.Severity] = append(bySev[f.Severity], f)
+		}
+
+		out := fmt.Sprintf("Supply chain audit: %d findings (%d high, %d medium, %d low)\n\n",
+			len(findings), len(bySev["high"]), len(bySev["medium"]), len(bySev["low"]))
+
+		for _, sev := range []string{"high", "medium", "low"} {
+			group := bySev[sev]
+			if len(group) == 0 {
+				continue
+			}
+			out += fmt.Sprintf("── %s (%d) ──\n", strings.ToUpper(sev), len(group))
+			for _, f := range group {
+				out += fmt.Sprintf("  %s@%s  [%s]\n", f.Package, f.Version, f.Category)
+				out += fmt.Sprintf("    %s\n", f.Detail)
+				if f.File != "" {
+					out += fmt.Sprintf("    %s\n", f.File)
+				}
+				out += "\n"
+			}
+		}
+
 		return mcp.NewToolResultText(out), nil
 	})
 
