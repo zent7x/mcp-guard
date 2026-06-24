@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	s := server.NewMCPServer("mcp-guard", "0.3.0",
+	s := server.NewMCPServer("mcp-guard", "0.4.0",
 		server.WithToolCapabilities(true),
 	)
 
@@ -547,6 +547,53 @@ func main() {
 		out := fmt.Sprintf("SHA-256 hashes for %s (%d files)\n\n", path, len(results))
 		for _, r := range results {
 			out += fmt.Sprintf("%s  %s  (%s)\n", r.Hash[:16]+"…", r.Path, formatBytes(r.Size))
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── bluetooth_scan ────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("bluetooth_scan",
+		mcp.WithDescription("Scan for nearby Bluetooth devices using local Bluetooth hardware. Returns device name, address, type, and pairing status. Requires a physical Bluetooth adapter — architecturally impossible for any cloud service."),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		devices, err := bluetoothScan()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("bluetooth_scan failed: %v", err)), nil
+		}
+		if len(devices) == 0 {
+			return mcp.NewToolResultText("No Bluetooth devices found"), nil
+		}
+		out := fmt.Sprintf("Bluetooth devices (%d found)\n\n", len(devices))
+		out += fmt.Sprintf("%-30s  %-20s  %-20s  %s\n", "NAME", "ADDRESS", "TYPE", "STATUS")
+		out += strings.Repeat("─", 85) + "\n"
+		for _, d := range devices {
+			status := "not paired"
+			if d.Paired {
+				status = "paired"
+			}
+			if d.RSSI != "" {
+				status += "  RSSI:" + d.RSSI
+			}
+			out += fmt.Sprintf("%-30s  %-20s  %-20s  %s\n", d.Name, d.Address, d.Type, status)
+		}
+		return mcp.NewToolResultText(out), nil
+	})
+
+	// ── usb_devices ───────────────────────────────────────────────────────────
+	s.AddTool(mcp.NewTool("usb_devices",
+		mcp.WithDescription("List all USB devices currently connected to this machine. Returns device name, vendor, product ID, speed, and manufacturer. Reads the local USB bus — no remote service can enumerate your physical ports."),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		devices, err := usbDevices()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("usb_devices failed: %v", err)), nil
+		}
+		if len(devices) == 0 {
+			return mcp.NewToolResultText("No USB devices found"), nil
+		}
+		out := fmt.Sprintf("USB devices (%d found)\n\n", len(devices))
+		out += fmt.Sprintf("%-35s  %-10s  %-10s  %-15s  %s\n", "NAME", "VENDOR ID", "PROD ID", "SPEED", "MANUFACTURER")
+		out += strings.Repeat("─", 90) + "\n"
+		for _, d := range devices {
+			out += fmt.Sprintf("%-35s  %-10s  %-10s  %-15s  %s\n", d.Name, d.VendorID, d.ProductID, d.Speed, d.Manufacturer)
 		}
 		return mcp.NewToolResultText(out), nil
 	})

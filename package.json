@@ -1,7 +1,7 @@
 {
   "name": "@zent7x/mcp-guard",
-  "version": "0.3.0",
-  "description": "Security MCP server — port scanning, SSL inspection, DNS enum, secret scanning, CVE checking, header auditing",
+  "version": "0.4.0",
+  "description": "Security MCP server with 20 tools — 12 require local hardware. Wi-Fi/Bluetooth/USB enumeration, ARP LAN discovery, kernel FS events, process introspection, secret scanning, port scanning, TLS inspection, CVE checking.",
   "main": "index.js",
   "bin": {
     "mcp-guard": "index.js"
@@ -22,7 +22,13 @@
     "secrets",
     "cve",
     "claude",
-    "cursor"
+    "cursor",
+    "wifi",
+    "bluetooth",
+    "usb",
+    "network",
+    "penetration-testing",
+    "arp"
   ],
   "license": "MIT",
   "engines": {

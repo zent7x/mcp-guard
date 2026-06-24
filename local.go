@@ -496,6 +496,225 @@ func hashFiles(root string) ([]HashResult, error) {
 	return results, err
 }
 
+// ── bluetooth_scan ────────────────────────────────────────────────────────────
+
+type BTDevice struct {
+	Name    string
+	Address string
+	Type    string
+	RSSI    string
+	Paired  bool
+}
+
+func bluetoothScan() ([]BTDevice, error) {
+	if runtime.GOOS == "darwin" {
+		return bluetoothScanMac()
+	}
+	if runtime.GOOS == "linux" {
+		return bluetoothScanLinux()
+	}
+	return nil, fmt.Errorf("bluetooth scan not supported on %s", runtime.GOOS)
+}
+
+func bluetoothScanMac() ([]BTDevice, error) {
+	out, err := exec.Command("system_profiler", "SPBluetoothDataType", "-json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("system_profiler failed: %w", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("json parse failed: %w", err)
+	}
+
+	var devices []BTDevice
+
+	bt, ok := result["SPBluetoothDataType"].([]interface{})
+	if !ok || len(bt) == 0 {
+		return devices, nil
+	}
+
+	root, ok := bt[0].(map[string]interface{})
+	if !ok {
+		return devices, nil
+	}
+
+	// paired devices
+	if paired, ok := root["device_title"].([]interface{}); ok {
+		for _, d := range paired {
+			dm, ok := d.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for name, v := range dm {
+				info, ok := v.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				dev := BTDevice{Name: name, Paired: true}
+				if addr, ok := info["device_address"].(string); ok {
+					dev.Address = addr
+				}
+				if t, ok := info["device_minorClassOfDevice_string"].(string); ok {
+					dev.Type = t
+				}
+				devices = append(devices, dev)
+			}
+		}
+	}
+
+	// nearby/not paired
+	if nearby, ok := root["device_not_connected"].([]interface{}); ok {
+		for _, d := range nearby {
+			dm, ok := d.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for name, v := range dm {
+				info, ok := v.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				dev := BTDevice{Name: name, Paired: false}
+				if addr, ok := info["device_address"].(string); ok {
+					dev.Address = addr
+				}
+				if rssi, ok := info["device_rssi"].(string); ok {
+					dev.RSSI = rssi
+				}
+				devices = append(devices, dev)
+			}
+		}
+	}
+
+	return devices, nil
+}
+
+func bluetoothScanLinux() ([]BTDevice, error) {
+	out, err := exec.Command("bluetoothctl", "devices").Output()
+	if err != nil {
+		return nil, fmt.Errorf("bluetoothctl failed: %w", err)
+	}
+	var devices []BTDevice
+	for _, line := range strings.Split(string(out), "\n") {
+		// format: Device AA:BB:CC:DD:EE:FF Name
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) < 3 || parts[0] != "Device" {
+			continue
+		}
+		devices = append(devices, BTDevice{
+			Address: parts[1],
+			Name:    parts[2],
+			Paired:  true,
+		})
+	}
+	return devices, nil
+}
+
+// ── usb_devices ───────────────────────────────────────────────────────────────
+
+type USBDevice struct {
+	Name        string
+	Vendor      string
+	ProductID   string
+	VendorID    string
+	Speed       string
+	Manufacturer string
+}
+
+func usbDevices() ([]USBDevice, error) {
+	if runtime.GOOS == "darwin" {
+		return usbDevicesMac()
+	}
+	if runtime.GOOS == "linux" {
+		return usbDevicesLinux()
+	}
+	return nil, fmt.Errorf("usb listing not supported on %s", runtime.GOOS)
+}
+
+func usbDevicesMac() ([]USBDevice, error) {
+	out, err := exec.Command("system_profiler", "SPUSBDataType", "-json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("system_profiler failed: %w", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("json parse failed: %w", err)
+	}
+
+	var devices []USBDevice
+	usb, ok := result["SPUSBDataType"].([]interface{})
+	if !ok {
+		return devices, nil
+	}
+
+	var walk func(items []interface{})
+	walk = func(items []interface{}) {
+		for _, item := range items {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			dev := USBDevice{}
+			if n, ok := m["_name"].(string); ok {
+				dev.Name = n
+			}
+			if vid, ok := m["vendor_id"].(string); ok {
+				dev.VendorID = vid
+			}
+			if pid, ok := m["product_id"].(string); ok {
+				dev.ProductID = pid
+			}
+			if mfr, ok := m["manufacturer"].(string); ok {
+				dev.Manufacturer = mfr
+			}
+			if spd, ok := m["device_speed"].(string); ok {
+				dev.Speed = spd
+			}
+			if dev.Name != "" {
+				devices = append(devices, dev)
+			}
+			if items, ok := m["_items"].([]interface{}); ok {
+				walk(items)
+			}
+		}
+	}
+	walk(usb)
+	return devices, nil
+}
+
+func usbDevicesLinux() ([]USBDevice, error) {
+	out, err := exec.Command("lsusb").Output()
+	if err != nil {
+		return nil, fmt.Errorf("lsusb failed: %w", err)
+	}
+	var devices []USBDevice
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		// Bus 001 Device 002: ID 1234:5678 Vendor Name
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		idParts := strings.Split(fields[5], ":")
+		vid, pid := "", ""
+		if len(idParts) == 2 {
+			vid = idParts[0]
+			pid = idParts[1]
+		}
+		name := strings.Join(fields[6:], " ")
+		devices = append(devices, USBDevice{
+			Name:     name,
+			VendorID: vid,
+			ProductID: pid,
+		})
+	}
+	return devices, nil
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func formatBytes(b int64) string {
