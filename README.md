@@ -14,7 +14,7 @@ Security and network MCP server for Claude Code and Cursor. Written in Go.
 
 Most MCP servers are API wrappers. Claude could look up the same data itself if it had web access.
 
-mcp-guard is different. **12 of its 20 tools require a physical machine to function.** Wi-Fi scanning needs a radio chip. Bluetooth scanning needs an adapter. ARP discovery sends Layer 2 frames that never leave your local network — no cloud service receives them. File watching subscribes to kernel events on your machine's filesystem. USB enumeration reads your physical ports.
+mcp-guard is different. **12 of its 22 tools require a physical machine to function.** Wi-Fi scanning needs a radio chip. Bluetooth scanning needs an adapter. ARP discovery sends Layer 2 frames that never leave your local network — no cloud service receives them. File watching subscribes to kernel events on your machine's filesystem. USB enumeration reads your physical ports.
 
 Claude runs in a data center. It has none of these things. These tools only work because the binary is running on your computer.
 
@@ -39,6 +39,13 @@ Claude runs in a data center. It has none of these things. These tools only work
 | `net_connections` | Live TCP connections on this machine (`netstat -an`) |
 | `scan_secrets` | Walk local files for hardcoded credentials — 20+ patterns (AWS, GitHub, OpenAI, Stripe, Slack, DB URLs, private keys) |
 | `hash_files` | SHA-256 every file in a directory — integrity baseline before/after deploys |
+
+### Forensics and supply chain
+
+| Tool | What it does |
+|------|-------------|
+| `persistence_scan` | Checks this machine for malware persistence: LaunchAgents/Daemons (macOS), systemd units (Linux), cron jobs, shell profile injections. Flags curl-pipe-to-bash, base64 payloads, binaries in /tmp |
+| `supply_chain_audit` | Audits node_modules for supply chain attacks: lifecycle scripts that download/execute remote code, typosquatting (Levenshtein distance 1 against 50 popular packages), eval() of runtime data in source |
 
 ### Network utilities
 
