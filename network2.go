@@ -147,10 +147,27 @@ func arpScan(cidr string) ([]ARPEntry, error) {
 			continue
 		}
 
+		// Skip broadcast/multicast entries — these are not real hosts.
+		// ff:ff:ff:ff:ff:ff is broadcast; 01:00:5e:* and 33:33:* are IPv4/IPv6 multicast.
+		macLower := strings.ToLower(mac)
+		if macLower == "ff:ff:ff:ff:ff:ff" ||
+			strings.HasPrefix(macLower, "01:00:5e") ||
+			strings.HasPrefix(macLower, "33:33") {
+			continue
+		}
+
 		// Filter to requested CIDR
 		parsedIP := net.ParseIP(ip)
 		if parsedIP == nil || !network.Contains(parsedIP) {
 			continue
+		}
+
+		// Skip network and broadcast addresses of the subnet itself.
+		if ip4 := parsedIP.To4(); ip4 != nil {
+			last := ip4[3]
+			if last == 0 || last == 255 {
+				continue
+			}
 		}
 
 		entries = append(entries, ARPEntry{

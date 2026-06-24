@@ -1,6 +1,6 @@
 {
   "name": "@zent7x/mcp-guard",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Security MCP server with 20 tools — 12 require local hardware. Wi-Fi/Bluetooth/USB enumeration, ARP LAN discovery, kernel FS events, process introspection, secret scanning, port scanning, TLS inspection, CVE checking.",
   "main": "index.js",
   "bin": {

@@ -38,11 +38,12 @@ func wifiScan() ([]WifiNetwork, error) {
 }
 
 func wifiScanMac() ([]WifiNetwork, error) {
+	// Apple removed the legacy `airport` utility in macOS 14.4+. Try it first
+	// for older systems, then fall back to system_profiler which still works.
 	airport := "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 	out, err := exec.Command(airport, "-s").Output()
 	if err != nil {
-		// try nmcli fallback
-		return nil, fmt.Errorf("airport not found: %v", err)
+		return wifiScanMacSystemProfiler()
 	}
 
 	var networks []WifiNetwork
@@ -97,6 +98,74 @@ func wifiScanMac() ([]WifiNetwork, error) {
 			Security: security,
 		})
 	}
+	return networks, nil
+}
+
+// wifiScanMacSystemProfiler enumerates nearby Wi-Fi networks on macOS 14.4+,
+// where Apple removed the `airport` CLI. Uses system_profiler, which still
+// reports nearby networks (channel, security, PHY mode). Note: macOS redacts
+// SSID names unless the calling process has Location Services permission.
+func wifiScanMacSystemProfiler() ([]WifiNetwork, error) {
+	out, err := exec.Command("system_profiler", "SPAirPortDataType", "-json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("system_profiler failed: %w", err)
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(out, &data); err != nil {
+		return nil, fmt.Errorf("parse system_profiler json: %w", err)
+	}
+
+	var networks []WifiNetwork
+
+	root, ok := data["SPAirPortDataType"].([]interface{})
+	if !ok || len(root) == 0 {
+		return networks, nil
+	}
+	top, ok := root[0].(map[string]interface{})
+	if !ok {
+		return networks, nil
+	}
+	ifaces, ok := top["spairport_airport_interfaces"].([]interface{})
+	if !ok {
+		return networks, nil
+	}
+
+	addNetwork := func(m map[string]interface{}) {
+		name, _ := m["_name"].(string)
+		if name == "" {
+			return
+		}
+		channel, _ := m["spairport_network_channel"].(string)
+		sec, _ := m["spairport_security_mode"].(string)
+		// Turn "spairport_security_mode_wpa2_personal_mixed" into "wpa2 personal mixed"
+		sec = strings.ReplaceAll(strings.TrimPrefix(sec, "spairport_security_mode_"), "_", " ")
+		networks = append(networks, WifiNetwork{
+			SSID:     name,
+			Channel:  channel,
+			Security: sec,
+		})
+	}
+
+	for _, raw := range ifaces {
+		iface, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Current connected network
+		if cur, ok := iface["spairport_current_network_information"].(map[string]interface{}); ok {
+			addNetwork(cur)
+		}
+		// All other nearby networks
+		if others, ok := iface["spairport_airport_other_local_wireless_networks"].([]interface{}); ok {
+			for _, o := range others {
+				if om, ok := o.(map[string]interface{}); ok {
+					addNetwork(om)
+				}
+			}
+		}
+	}
+
 	return networks, nil
 }
 

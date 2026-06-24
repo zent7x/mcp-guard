@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	s := server.NewMCPServer("mcp-guard", "0.7.0",
+	s := server.NewMCPServer("mcp-guard", "0.8.0",
 		server.WithToolCapabilities(true),
 	)
 
